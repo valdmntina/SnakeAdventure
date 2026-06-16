@@ -1,0 +1,564 @@
+import pygame
+import random
+import math
+import json
+import os
+
+pygame.init()
+
+WIDTH = 800
+HEIGHT = 600
+
+CELL_SIZE = 20
+
+BASE_INTERVAL = 110
+MIN_INTERVAL = 55
+SPEED_STEP = 4
+
+MAX_SCORES = 5
+HIGHSCORE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "highscores.json"
+)
+
+# Tuneles estilo Mario: cada par conecta dos celdas. Si la cabeza entra
+# a una, sale por su par. Los bordes de la pantalla siguen siendo mortales.
+TUNNELS = [
+    {"a": (0, 200), "b": (WIDTH - CELL_SIZE, 380), "color": (60, 200, 90)},
+    {"a": (300, 0), "b": (480, HEIGHT - CELL_SIZE), "color": (230, 150, 50)},
+    {"a": (140, 100), "b": (640, 460), "color": (80, 180, 255)},
+    {"a": (60, 480), "b": (720, 140), "color": (200, 90, 230)},
+    {"a": (220, 540), "b": (540, 60), "color": (60, 210, 210)},
+]
+
+tunnel_exit = {}
+tunnel_cells = []
+for _pair in TUNNELS:
+    tunnel_exit[_pair["a"]] = _pair["b"]
+    tunnel_exit[_pair["b"]] = _pair["a"]
+    tunnel_cells.append((_pair["a"], _pair["color"]))
+    tunnel_cells.append((_pair["b"], _pair["color"]))
+
+tunnel_positions = {cell for cell, _ in tunnel_cells}
+
+
+def current_interval():
+    return max(MIN_INTERVAL, BASE_INTERVAL - score * SPEED_STEP)
+
+
+def load_high_scores():
+    try:
+        with open(HIGHSCORE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        scores = [int(s) for s in data]
+        return sorted(scores, reverse=True)[:MAX_SCORES]
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return []
+
+
+def save_high_scores(scores):
+    try:
+        with open(HIGHSCORE_FILE, "w", encoding="utf-8") as f:
+            json.dump(scores, f)
+    except OSError:
+        pass
+
+
+def register_score(value):
+    global high_scores, new_record
+
+    if value <= 0:
+        new_record = False
+        return
+
+    prev_best = high_scores[0] if high_scores else 0
+    high_scores.append(value)
+    high_scores = sorted(high_scores, reverse=True)[:MAX_SCORES]
+    new_record = value > prev_best
+    save_high_scores(high_scores)
+
+
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Snake")
+
+clock = pygame.time.Clock()
+
+font = pygame.font.SysFont(None, 48)
+small_font = pygame.font.SysFont(None, 32)
+list_font = pygame.font.SysFont(None, 28)
+button_font = pygame.font.SysFont(None, 22)
+
+restart_button = pygame.Rect(WIDTH - 95, 10, 85, 28)
+pause_button = pygame.Rect(WIDTH - 188, 10, 85, 28)
+score_area = pygame.Rect(0, 0, 200, 64)
+
+
+def draw_button(rect, label):
+    hovered = rect.collidepoint(pygame.mouse.get_pos())
+    fill = (100, 100, 100) if hovered else (70, 70, 70)
+
+    pygame.draw.rect(screen, fill, rect, border_radius=6)
+    pygame.draw.rect(screen, (160, 160, 160), rect, 2, border_radius=6)
+
+    text = button_font.render(label, True, (255, 255, 255))
+    screen.blit(
+        text,
+        (
+            rect.centerx - text.get_width() // 2,
+            rect.centery - text.get_height() // 2
+        )
+    )
+
+
+def draw_head_features(hx, hy):
+    cx = hx + CELL_SIZE / 2
+    cy = hy + CELL_SIZE / 2
+
+    fx, fy = direction_x, direction_y
+    px, py = -fy, fx
+
+    forward = CELL_SIZE * 0.18
+    side = CELL_SIZE * 0.22
+
+    blink = (anim_time % 3200) < 130
+
+    for s in (-1, 1):
+        ex = cx + fx * forward + px * s * side
+        ey = cy + fy * forward + py * s * side
+
+        if game_over:
+            pygame.draw.line(screen, (20, 20, 20),
+                             (int(ex - 3), int(ey - 3)), (int(ex + 3), int(ey + 3)), 2)
+            pygame.draw.line(screen, (20, 20, 20),
+                             (int(ex - 3), int(ey + 3)), (int(ex + 3), int(ey - 3)), 2)
+        elif blink:
+            pygame.draw.line(screen, (15, 50, 15),
+                             (int(ex - 3), int(ey)), (int(ex + 3), int(ey)), 2)
+        else:
+            pygame.draw.circle(screen, (255, 255, 255), (int(ex), int(ey)), 3)
+            pygame.draw.circle(screen, (10, 10, 10),
+                               (int(ex + fx * 1.5), int(ey + fy * 1.5)), 2)
+
+    if not game_over and not blink:
+        phase = anim_time % 1800
+        if phase < 260:
+            ext = math.sin(phase / 260 * math.pi) * 7
+            bx = cx + fx * (CELL_SIZE * 0.5)
+            by = cy + fy * (CELL_SIZE * 0.5)
+            tx = bx + fx * ext
+            ty = by + fy * ext
+            pygame.draw.line(screen, (230, 40, 70),
+                             (int(bx), int(by)), (int(tx), int(ty)), 2)
+            pygame.draw.line(screen, (230, 40, 70), (int(tx), int(ty)),
+                             (int(tx + fx * 3 + px * 3), int(ty + fy * 3 + py * 3)), 2)
+            pygame.draw.line(screen, (230, 40, 70), (int(tx), int(ty)),
+                             (int(tx + fx * 3 - px * 3), int(ty + fy * 3 - py * 3)), 2)
+
+
+def draw_segment(draw_x, draw_y, color, is_head):
+    pygame.draw.rect(
+        screen,
+        color,
+        (draw_x, draw_y, CELL_SIZE, CELL_SIZE),
+        border_radius=6
+    )
+    if is_head:
+        draw_head_features(draw_x, draw_y)
+
+
+def draw_tunnels():
+    glow = (math.sin(anim_time / 220.0) + 1) / 2
+    for (cx, cy), color in tunnel_cells:
+        rect = pygame.Rect(cx, cy, CELL_SIZE, CELL_SIZE)
+        base = (
+            int(color[0] * 0.35),
+            int(color[1] * 0.35),
+            int(color[2] * 0.35),
+        )
+        rim = (
+            min(255, int(color[0] * (0.7 + 0.3 * glow))),
+            min(255, int(color[1] * (0.7 + 0.3 * glow))),
+            min(255, int(color[2] * (0.7 + 0.3 * glow))),
+        )
+        pygame.draw.rect(screen, base, rect, border_radius=8)
+        pygame.draw.rect(screen, rim, rect, 3, border_radius=8)
+        inner = rect.inflate(-int(CELL_SIZE * 0.45), -int(CELL_SIZE * 0.45))
+        pygame.draw.ellipse(screen, (12, 12, 18), inner)
+
+
+def queue_direction(dx, dy):
+    # La direccion de referencia es el ultimo giro en cola (o la actual si
+    # la cola esta vacia). Asi varias teclas seguidas se respetan en orden.
+    if direction_queue:
+        ref_x, ref_y = direction_queue[-1]
+    else:
+        ref_x, ref_y = direction_x, direction_y
+
+    # Ignora repetir la misma direccion o un giro de 180 grados.
+    if (dx, dy) == (ref_x, ref_y):
+        return
+    if (dx, dy) == (-ref_x, -ref_y):
+        return
+    if len(direction_queue) >= 2:
+        return
+
+    direction_queue.append((dx, dy))
+
+
+def place_food():
+    blocked = [
+        restart_button.inflate(CELL_SIZE, CELL_SIZE),
+        pause_button.inflate(CELL_SIZE, CELL_SIZE),
+        score_area,
+    ]
+    while True:
+        x = random.randrange(0, WIDTH, CELL_SIZE)
+        y = random.randrange(0, HEIGHT, CELL_SIZE)
+
+        if [x, y] in snake:
+            continue
+
+        if (x, y) in tunnel_positions:
+            continue
+
+        cell = pygame.Rect(x, y, CELL_SIZE, CELL_SIZE)
+        if any(cell.colliderect(b) for b in blocked):
+            continue
+
+        return x, y
+
+
+def reset_game():
+    global snake, prev_snake, direction_x, direction_y, direction_queue
+    global food_x, food_y, game_over, time_since_move, score, paused
+    global pops, game_over_time, score_recorded, new_record
+
+    snake = [
+        [400, 300],
+        [380, 300],
+        [360, 300]
+    ]
+
+    prev_snake = [segment[:] for segment in snake]
+
+    direction_x = 1
+    direction_y = 0
+
+    direction_queue = []
+
+    food_x, food_y = place_food()
+
+    game_over = False
+
+    time_since_move = 0
+
+    score = 0
+
+    paused = False
+
+    pops = []
+
+    game_over_time = 0
+
+    score_recorded = False
+
+    new_record = False
+
+
+running = True
+anim_time = 0
+high_scores = load_high_scores()
+new_record = False
+reset_game()
+
+
+def draw_grid():
+    for x in range(0, WIDTH, CELL_SIZE):
+        pygame.draw.line(screen, (40, 40, 40), (x, 0), (x, HEIGHT))
+    for y in range(0, HEIGHT, CELL_SIZE):
+        pygame.draw.line(screen, (40, 40, 40), (0, y), (WIDTH, y))
+
+
+while running:
+
+    dt = clock.tick(60)
+
+    anim_time += dt
+
+    if game_over:
+        game_over_time += dt
+
+    for pop in pops:
+        pop[2] += dt
+    pops[:] = [p for p in pops if p[2] <= 350]
+
+    for event in pygame.event.get():
+
+        if event.type == pygame.QUIT:
+            running = False
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+
+            if restart_button.collidepoint(event.pos):
+                reset_game()
+
+            elif pause_button.collidepoint(event.pos) and not game_over:
+                paused = not paused
+
+        if event.type == pygame.KEYDOWN:
+
+            if game_over and event.key == pygame.K_SPACE:
+                reset_game()
+                continue
+
+            if event.key == pygame.K_p and not game_over:
+                paused = not paused
+                continue
+
+            if event.key in (pygame.K_LEFT, pygame.K_a):
+                queue_direction(-1, 0)
+
+            elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                queue_direction(1, 0)
+
+            elif event.key in (pygame.K_UP, pygame.K_w):
+                queue_direction(0, -1)
+
+            elif event.key in (pygame.K_DOWN, pygame.K_s):
+                queue_direction(0, 1)
+
+    if not game_over and not paused:
+
+        time_since_move += dt
+
+        # Limita la acumulacion para que un tiron del sistema no provoque
+        # un salto de varios pasos de golpe.
+        max_acc = current_interval() * 3
+        if time_since_move > max_acc:
+            time_since_move = max_acc
+
+        while time_since_move >= current_interval():
+            time_since_move -= current_interval()
+
+            prev_snake = [segment[:] for segment in snake]
+
+            if direction_queue:
+                direction_x, direction_y = direction_queue.pop(0)
+
+            head_x = snake[0][0]
+            head_y = snake[0][1]
+
+            new_head = [
+                head_x + direction_x * CELL_SIZE,
+                head_y + direction_y * CELL_SIZE
+            ]
+
+            # Tocar el borde de la pantalla = perder.
+            if (
+                new_head[0] < 0
+                or new_head[0] >= WIDTH
+                or new_head[1] < 0
+                or new_head[1] >= HEIGHT
+            ):
+                game_over = True
+                time_since_move = 0
+                break
+
+            # Tunel estilo Mario: entrar a un tunel te saca por su par.
+            exit_cell = tunnel_exit.get((new_head[0], new_head[1]))
+            if exit_cell is not None:
+                new_head = [exit_cell[0], exit_cell[1]]
+
+            snake.insert(0, new_head)
+
+            if new_head[0] == food_x and new_head[1] == food_y:
+
+                pops.append([food_x + CELL_SIZE / 2, food_y + CELL_SIZE / 2, 0])
+
+                food_x, food_y = place_food()
+                score += 1
+
+            else:
+                snake.pop()
+
+            if new_head in snake[1:]:
+                game_over = True
+
+            if game_over:
+                time_since_move = 0
+                break
+
+    if game_over and not score_recorded:
+        register_score(score)
+        score_recorded = True
+
+    screen.fill((25, 25, 25))
+
+    draw_grid()
+
+    draw_tunnels()
+
+    pulse = (math.sin(anim_time / 180.0) + 1) / 2
+    food_radius = int(CELL_SIZE * (0.38 + 0.06 * pulse))
+    fcx = int(food_x + CELL_SIZE / 2)
+    fcy = int(food_y + CELL_SIZE / 2)
+
+    pygame.draw.line(
+        screen, (90, 60, 30),
+        (fcx, fcy - food_radius), (fcx + 2, fcy - food_radius - 4), 2
+    )
+    pygame.draw.circle(
+        screen, (60, 180, 60),
+        (fcx + 5, fcy - food_radius - 3), 3
+    )
+    pygame.draw.circle(screen, (210, 40, 40), (fcx, fcy), food_radius)
+    pygame.draw.circle(
+        screen, (255, 130, 130),
+        (int(fcx - food_radius * 0.3), int(fcy - food_radius * 0.3)),
+        max(1, int(food_radius * 0.3))
+    )
+
+    t = 1.0 if game_over else min(time_since_move / current_interval(), 1.0)
+
+    for i, segment in enumerate(snake):
+
+        if i < len(prev_snake):
+            start_x, start_y = prev_snake[i]
+        else:
+            start_x, start_y = segment
+
+        dx = segment[0] - start_x
+        dy = segment[1] - start_y
+
+        if abs(dx) > CELL_SIZE or abs(dy) > CELL_SIZE:
+            # El segmento cruzo un tunel: aparece directo en el destino
+            # en vez de deslizarse por toda la pantalla.
+            draw_x = segment[0]
+            draw_y = segment[1]
+        else:
+            draw_x = start_x + dx * t
+            draw_y = start_y + dy * t
+
+        flash = (
+            game_over
+            and game_over_time < 600
+            and (game_over_time // 120) % 2 == 0
+        )
+
+        if flash:
+            color = (220, 50, 50)
+        else:
+            shade = max(110, 255 - i * 7)
+            color = (0, shade, 0)
+
+        draw_segment(draw_x, draw_y, color, i == 0)
+
+    for pop in pops:
+        prog = pop[2] / 350
+        radius = int(CELL_SIZE * (0.4 + 1.4 * prog))
+        alpha = max(0, int(200 * (1 - prog)))
+        ring = pygame.Surface((radius * 2 + 4, radius * 2 + 4), pygame.SRCALPHA)
+        pygame.draw.circle(
+            ring, (255, 240, 120, alpha),
+            (radius + 2, radius + 2), radius, 3
+        )
+        screen.blit(ring, (int(pop[0] - radius - 2), int(pop[1] - radius - 2)))
+
+    score_text = small_font.render(
+        "Puntaje: " + str(score),
+        True,
+        (255, 255, 255)
+    )
+    screen.blit(score_text, (10, 10))
+
+    best = max(high_scores[0] if high_scores else 0, score)
+    record_text = list_font.render(
+        "Récord: " + str(best),
+        True,
+        (230, 200, 90)
+    )
+    screen.blit(record_text, (10, 40))
+
+    draw_button(pause_button, "Reanudar" if paused else "Pausar")
+    draw_button(restart_button, "Reiniciar")
+
+    if paused and not game_over:
+
+        pause_text = font.render(
+            "PAUSA",
+            True,
+            (255, 255, 255)
+        )
+
+        screen.blit(
+            pause_text,
+            (
+                WIDTH // 2 - pause_text.get_width() // 2,
+                HEIGHT // 2 - pause_text.get_height() // 2
+            )
+        )
+
+    if game_over:
+
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        fade = min(180, int(game_over_time / 600 * 180))
+        overlay.fill((0, 0, 0, fade))
+        screen.blit(overlay, (0, 0))
+
+        y0 = 150
+
+        text = font.render("GAME OVER", True, (255, 255, 255))
+        screen.blit(text, (WIDTH // 2 - text.get_width() // 2, y0))
+
+        if new_record:
+            rec = small_font.render("¡Nuevo récord!", True, (255, 215, 0))
+            screen.blit(rec, (WIDTH // 2 - rec.get_width() // 2, y0 + 55))
+
+        title = small_font.render("Mejores puntajes", True, (255, 255, 255))
+        screen.blit(title, (WIDTH // 2 - title.get_width() // 2, y0 + 110))
+
+        list_y = y0 + 150
+        if high_scores:
+            highlighted = False
+            for idx, s in enumerate(high_scores):
+                is_current = (not highlighted) and new_record and s == score
+                if is_current:
+                    highlighted = True
+                    color = (255, 215, 0)
+                else:
+                    color = (210, 210, 210)
+                line = list_font.render(
+                    str(idx + 1) + ".   " + str(s),
+                    True,
+                    color
+                )
+                screen.blit(
+                    line,
+                    (WIDTH // 2 - line.get_width() // 2, list_y + idx * 30)
+                )
+        else:
+            none_line = list_font.render(
+                "Sin puntajes aún", True, (170, 170, 170)
+            )
+            screen.blit(
+                none_line,
+                (WIDTH // 2 - none_line.get_width() // 2, list_y)
+            )
+
+        restart_text = small_font.render(
+            "Presiona ESPACIO para reiniciar",
+            True,
+            (200, 200, 200)
+        )
+
+        screen.blit(
+            restart_text,
+            (
+                WIDTH // 2 - restart_text.get_width() // 2,
+                HEIGHT - 60
+            )
+        )
+
+    pygame.display.flip()
+
+pygame.quit()
