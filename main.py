@@ -380,10 +380,8 @@ def spawn_enemy():
 
 
 def relocate_tunnels():
-    # Mueve cada tunel a dos celdas nuevas al azar (conservando su color).
     global tunnel_exit, tunnel_cells, tunnel_positions
 
-    # Se vacian primero para que las celdas viejas no bloqueen la eleccion.
     tunnel_exit = {}
     tunnel_cells = []
     tunnel_positions = set()
@@ -413,15 +411,12 @@ def resolve_enemy_contact():
                     [e["x"] + CELL_SIZE / 2, e["y"] + CELL_SIZE / 2, 0]
                 )
                 score += ENEMY_EAT_BONUS
-                # Con el poder, el fantasma se come y desaparece del tablero.
                 eaten.append(e)
             else:
                 game_over = True
                 time_since_move = 0
                 return
-
-    # Los fantasmas comidos no reaparecen al instante: vuelven a salir en el
-    # proximo nivel (cada LEVEL_EVERY manzanas).
+            
     for e in eaten:
         enemies.remove(e)
 
@@ -493,7 +488,6 @@ def reset_game():
 
     apples = 0
 
-    # Cada partida arranca con los tuneles en su posicion original.
     apply_tunnels(TUNNELS)
 
     food_x, food_y = place_food()
