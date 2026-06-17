@@ -15,14 +15,33 @@ BASE_INTERVAL = 110
 MIN_INTERVAL = 55
 SPEED_STEP = 4
 
+ENEMIES_START = 1
+MAX_ENEMIES = 6
+LEVEL_EVERY = 5
+ENEMY_INTERVAL = 170
+ENEMY_RANDOMNESS = 0.18
+ENEMY_MIN_SPAWN_DIST = 160
+ENEMY_EAT_BONUS = 3
+POWER_DURATION = 6000
+POWER_EVERY = 5
+POWER_MIN_ENEMIES = 2
+ENEMY_COLORS = [
+    (255, 80, 80),
+    (255, 150, 40),
+    (255, 90, 200),
+    (120, 200, 255),
+    (150, 255, 120),
+    (200, 130, 255),
+]
+SCARED_COLOR = (40, 70, 230)
+SCARED_END_COLOR = (235, 235, 255) 
+
 MAX_SCORES = 5
 HIGHSCORE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "highscores.json"
 )
 
-# Tuneles estilo Mario: cada par conecta dos celdas. Si la cabeza entra
-# a una, sale por su par. Los bordes de la pantalla siguen siendo mortales.
 TUNNELS = [
     {"a": (0, 200), "b": (WIDTH - CELL_SIZE, 380), "color": (60, 200, 90)},
     {"a": (300, 0), "b": (480, HEIGHT - CELL_SIZE), "color": (230, 150, 50)},
@@ -44,6 +63,14 @@ tunnel_positions = {cell for cell, _ in tunnel_cells}
 
 def current_interval():
     return max(MIN_INTERVAL, BASE_INTERVAL - score * SPEED_STEP)
+
+
+def current_level():
+    return apples // LEVEL_EVERY + 1
+
+
+def desired_enemy_count():
+    return min(MAX_ENEMIES, ENEMIES_START + apples // LEVEL_EVERY)
 
 
 def load_high_scores():
@@ -90,7 +117,7 @@ button_font = pygame.font.SysFont(None, 22)
 
 restart_button = pygame.Rect(WIDTH - 95, 10, 85, 28)
 pause_button = pygame.Rect(WIDTH - 188, 10, 85, 28)
-score_area = pygame.Rect(0, 0, 200, 64)
+score_area = pygame.Rect(0, 0, 200, 92)
 
 
 def draw_button(rect, label):
@@ -186,15 +213,91 @@ def draw_tunnels():
         pygame.draw.ellipse(screen, (12, 12, 18), inner)
 
 
+def draw_power_food():
+    if power_food is None:
+        return
+
+    pcx = power_food[0] + CELL_SIZE / 2
+    pcy = power_food[1] + CELL_SIZE / 2
+    glow = (math.sin(anim_time / 120.0) + 1) / 2
+
+    halo = pygame.Surface((CELL_SIZE * 2, CELL_SIZE * 2), pygame.SRCALPHA)
+    pygame.draw.circle(
+        halo, (120, 180, 255, 90),
+        (CELL_SIZE, CELL_SIZE),
+        int(CELL_SIZE * 0.7 * (0.7 + 0.3 * glow))
+    )
+    screen.blit(halo, (int(pcx - CELL_SIZE), int(pcy - CELL_SIZE)))
+
+    r = int(CELL_SIZE * (0.3 + 0.12 * glow))
+    pygame.draw.circle(screen, (120, 200, 255), (int(pcx), int(pcy)), r)
+    pygame.draw.circle(
+        screen, (235, 250, 255),
+        (int(pcx), int(pcy)), max(1, int(r * 0.4))
+    )
+
+
+def draw_ghost(e):
+    scared = power_timer > 0
+
+    t_e = 1.0 if game_over else min(enemy_time / ENEMY_INTERVAL, 1.0)
+    dxp = e["x"] - e["px"]
+    dyp = e["y"] - e["py"]
+    if abs(dxp) > CELL_SIZE or abs(dyp) > CELL_SIZE:
+        gx, gy = e["x"], e["y"]
+    else:
+        gx = e["px"] + dxp * t_e
+        gy = e["py"] + dyp * t_e
+
+    if scared:
+        ending = power_timer < 1500 and (anim_time // 200) % 2 == 0
+        body = SCARED_END_COLOR if ending else SCARED_COLOR
+    else:
+        body = e["color"]
+
+    cx = gx + CELL_SIZE / 2
+    top = gy + CELL_SIZE * 0.30
+    radius = CELL_SIZE * 0.40
+
+    pygame.draw.circle(screen, body, (int(cx), int(top)), int(radius))
+    pygame.draw.rect(
+        screen, body,
+        (int(cx - radius), int(top), int(radius * 2), int(CELL_SIZE * 0.32))
+    )
+
+    base_y = top + CELL_SIZE * 0.32
+    seg = (radius * 2) / 3
+    for k in range(3):
+        x0 = cx - radius + k * seg
+        pygame.draw.polygon(screen, body, [
+            (x0, base_y),
+            (x0 + seg / 2, base_y + CELL_SIZE * 0.16),
+            (x0 + seg, base_y),
+        ])
+
+    # Mira hacia la cabeza de la serpiente.
+    head_x, head_y = snake[0]
+    look_x = (head_x > gx) - (head_x < gx)
+    look_y = (head_y > gy) - (head_y < gy)
+
+    for s in (-1, 1):
+        ex = cx + s * radius * 0.42
+        ey = top - radius * 0.05
+        pygame.draw.circle(screen, (255, 255, 255), (int(ex), int(ey)),
+                           int(radius * 0.30))
+        pygame.draw.circle(
+            screen, (20, 20, 60),
+            (int(ex + look_x * 2), int(ey + look_y * 2)),
+            max(1, int(radius * 0.16))
+        )
+
+
 def queue_direction(dx, dy):
-    # La direccion de referencia es el ultimo giro en cola (o la actual si
-    # la cola esta vacia). Asi varias teclas seguidas se respetan en orden.
     if direction_queue:
         ref_x, ref_y = direction_queue[-1]
     else:
         ref_x, ref_y = direction_x, direction_y
 
-    # Ignora repetir la misma direccion o un giro de 180 grados.
     if (dx, dy) == (ref_x, ref_y):
         return
     if (dx, dy) == (-ref_x, -ref_y):
@@ -205,12 +308,24 @@ def queue_direction(dx, dy):
     direction_queue.append((dx, dy))
 
 
-def place_food():
+def occupied_cells(include_food=True):
+    cells = set()
+    if include_food:
+        cells.add((food_x, food_y))
+    if power_food is not None:
+        cells.add((power_food[0], power_food[1]))
+    for e in enemies:
+        cells.add((e["x"], e["y"]))
+    return cells
+
+
+def random_free_cell(min_head_dist=0, avoid=()):
     blocked = [
         restart_button.inflate(CELL_SIZE, CELL_SIZE),
         pause_button.inflate(CELL_SIZE, CELL_SIZE),
         score_area,
     ]
+    head_x, head_y = snake[0]
     while True:
         x = random.randrange(0, WIDTH, CELL_SIZE)
         y = random.randrange(0, HEIGHT, CELL_SIZE)
@@ -221,17 +336,110 @@ def place_food():
         if (x, y) in tunnel_positions:
             continue
 
+        if (x, y) in avoid:
+            continue
+
         cell = pygame.Rect(x, y, CELL_SIZE, CELL_SIZE)
         if any(cell.colliderect(b) for b in blocked):
             continue
 
+        if min_head_dist and abs(x - head_x) + abs(y - head_y) < min_head_dist:
+            continue
+
         return x, y
+
+
+def place_food():
+    return random_free_cell(avoid=occupied_cells(include_food=False))
+
+
+def respawn_enemy(e):
+    x, y = random_free_cell(
+        min_head_dist=ENEMY_MIN_SPAWN_DIST,
+        avoid=occupied_cells(),
+    )
+    e["x"], e["y"] = x, y
+    e["px"], e["py"] = x, y
+    e["dx"], e["dy"] = 0, 0
+
+
+def spawn_enemy():
+    x, y = random_free_cell(
+        min_head_dist=ENEMY_MIN_SPAWN_DIST,
+        avoid=occupied_cells(),
+    )
+    enemies.append({
+        "x": x, "y": y,
+        "px": x, "py": y,
+        "dx": 0, "dy": 0,
+        "color": ENEMY_COLORS[len(enemies) % len(ENEMY_COLORS)],
+    })
+
+
+def resolve_enemy_contact():
+    global game_over, score, time_since_move
+
+    head = snake[0]
+    for e in enemies:
+        if [e["x"], e["y"]] == head:
+            if power_timer > 0:
+                pops.append(
+                    [e["x"] + CELL_SIZE / 2, e["y"] + CELL_SIZE / 2, 0]
+                )
+                score += ENEMY_EAT_BONUS
+                respawn_enemy(e)
+            else:
+                game_over = True
+                time_since_move = 0
+                return
+
+
+def step_enemies():
+    scared = power_timer > 0
+    head_x, head_y = snake[0]
+    moves = [
+        (CELL_SIZE, 0),
+        (-CELL_SIZE, 0),
+        (0, CELL_SIZE),
+        (0, -CELL_SIZE),
+    ]
+
+    for e in enemies:
+        valid = [
+            (dx, dy) for dx, dy in moves
+            if 0 <= e["x"] + dx < WIDTH and 0 <= e["y"] + dy < HEIGHT
+        ]
+        if not valid:
+            continue
+
+        # Evita dar media vuelta salvo que sea la unica salida.
+        non_reverse = [m for m in valid if m != (-e["dx"], -e["dy"])]
+        pool = non_reverse or valid
+
+        if random.random() < ENEMY_RANDOMNESS:
+            choice = random.choice(pool)
+        else:
+            def dist_after(m):
+                return (
+                    abs(e["x"] + m[0] - head_x)
+                    + abs(e["y"] + m[1] - head_y)
+                )
+
+            choice = (max if scared else min)(pool, key=dist_after)
+
+        e["px"], e["py"] = e["x"], e["y"]
+        e["dx"], e["dy"] = choice
+        e["x"] += choice[0]
+        e["y"] += choice[1]
+
+    resolve_enemy_contact()
 
 
 def reset_game():
     global snake, prev_snake, direction_x, direction_y, direction_queue
     global food_x, food_y, game_over, time_since_move, score, paused
     global pops, game_over_time, score_recorded, new_record
+    global enemies, power_food, power_timer, enemy_time, apples
 
     snake = [
         [400, 300],
@@ -246,7 +454,17 @@ def reset_game():
 
     direction_queue = []
 
+    enemies = []
+    power_food = None
+    power_timer = 0
+    enemy_time = 0
+
+    apples = 0
+
     food_x, food_y = place_food()
+
+    for _ in range(ENEMIES_START):
+        spawn_enemy()
 
     game_over = False
 
@@ -331,8 +549,6 @@ while running:
 
         time_since_move += dt
 
-        # Limita la acumulacion para que un tiron del sistema no provoque
-        # un salto de varios pasos de golpe.
         max_acc = current_interval() * 3
         if time_since_move > max_acc:
             time_since_move = max_acc
@@ -353,7 +569,6 @@ while running:
                 head_y + direction_y * CELL_SIZE
             ]
 
-            # Tocar el borde de la pantalla = perder.
             if (
                 new_head[0] < 0
                 or new_head[0] >= WIDTH
@@ -364,29 +579,69 @@ while running:
                 time_since_move = 0
                 break
 
-            # Tunel estilo Mario: entrar a un tunel te saca por su par.
             exit_cell = tunnel_exit.get((new_head[0], new_head[1]))
             if exit_cell is not None:
                 new_head = [exit_cell[0], exit_cell[1]]
 
             snake.insert(0, new_head)
 
-            if new_head[0] == food_x and new_head[1] == food_y:
+            ate_food = new_head[0] == food_x and new_head[1] == food_y
+            ate_power = (
+                power_food is not None
+                and new_head[0] == power_food[0]
+                and new_head[1] == power_food[1]
+            )
 
+            if ate_food:
                 pops.append([food_x + CELL_SIZE / 2, food_y + CELL_SIZE / 2, 0])
-
                 food_x, food_y = place_food()
                 score += 1
+                apples += 1
+
+                while len(enemies) < desired_enemy_count():
+                    spawn_enemy()
+
+                if (
+                    power_food is None
+                    and apples % POWER_EVERY == 0
+                    and len(enemies) >= POWER_MIN_ENEMIES
+                ):
+                    px, py = random_free_cell(avoid=occupied_cells())
+                    power_food = [px, py]
 
             else:
                 snake.pop()
 
+            if ate_power:
+                pops.append([
+                    power_food[0] + CELL_SIZE / 2,
+                    power_food[1] + CELL_SIZE / 2,
+                    0
+                ])
+                power_food = None
+                power_timer = POWER_DURATION
+                score += 1
+
             if new_head in snake[1:]:
                 game_over = True
+
+            if not game_over:
+                resolve_enemy_contact()
 
             if game_over:
                 time_since_move = 0
                 break
+
+        if power_timer > 0:
+            power_timer = max(0, power_timer - dt)
+
+        if not game_over:
+            enemy_time += dt
+            while enemy_time >= ENEMY_INTERVAL:
+                enemy_time -= ENEMY_INTERVAL
+                step_enemies()
+                if game_over:
+                    break
 
     if game_over and not score_recorded:
         register_score(score)
@@ -397,6 +652,8 @@ while running:
     draw_grid()
 
     draw_tunnels()
+
+    draw_power_food()
 
     pulse = (math.sin(anim_time / 180.0) + 1) / 2
     food_radius = int(CELL_SIZE * (0.38 + 0.06 * pulse))
@@ -420,6 +677,8 @@ while running:
 
     t = 1.0 if game_over else min(time_since_move / current_interval(), 1.0)
 
+    head_cx, head_cy = snake[0][0] + CELL_SIZE / 2, snake[0][1] + CELL_SIZE / 2
+
     for i, segment in enumerate(snake):
 
         if i < len(prev_snake):
@@ -431,13 +690,15 @@ while running:
         dy = segment[1] - start_y
 
         if abs(dx) > CELL_SIZE or abs(dy) > CELL_SIZE:
-            # El segmento cruzo un tunel: aparece directo en el destino
-            # en vez de deslizarse por toda la pantalla.
             draw_x = segment[0]
             draw_y = segment[1]
         else:
             draw_x = start_x + dx * t
             draw_y = start_y + dy * t
+
+        if i == 0:
+            head_cx = draw_x + CELL_SIZE / 2
+            head_cy = draw_y + CELL_SIZE / 2
 
         flash = (
             game_over
@@ -452,6 +713,19 @@ while running:
             color = (0, shade, 0)
 
         draw_segment(draw_x, draw_y, color, i == 0)
+
+    if power_timer > 0 and not game_over:
+        pulse_a = (math.sin(anim_time / 90.0) + 1) / 2
+        aura_r = int(CELL_SIZE * (0.7 + 0.25 * pulse_a))
+        aura = pygame.Surface((aura_r * 2 + 4, aura_r * 2 + 4), pygame.SRCALPHA)
+        pygame.draw.circle(
+            aura, (120, 200, 255, 90),
+            (aura_r + 2, aura_r + 2), aura_r, 3
+        )
+        screen.blit(aura, (int(head_cx - aura_r - 2), int(head_cy - aura_r - 2)))
+
+    for e in enemies:
+        draw_ghost(e)
 
     for pop in pops:
         prog = pop[2] / 350
@@ -478,6 +752,25 @@ while running:
         (230, 200, 90)
     )
     screen.blit(record_text, (10, 40))
+
+    level_text = list_font.render(
+        "Nivel: " + str(current_level()),
+        True,
+        (140, 220, 255)
+    )
+    screen.blit(level_text, (10, 66))
+
+    if power_timer > 0 and not game_over:
+        frac = power_timer / POWER_DURATION
+        bar_w = 200
+        bx = WIDTH // 2 - bar_w // 2
+        by = 18
+        pygame.draw.rect(screen, (50, 55, 80), (bx, by, bar_w, 10),
+                         border_radius=5)
+        pygame.draw.rect(screen, (120, 200, 255),
+                         (bx, by, int(bar_w * frac), 10), border_radius=5)
+        label = button_font.render("¡PODER!", True, (180, 220, 255))
+        screen.blit(label, (WIDTH // 2 - label.get_width() // 2, by + 12))
 
     draw_button(pause_button, "Reanudar" if paused else "Pausar")
     draw_button(restart_button, "Reiniciar")
