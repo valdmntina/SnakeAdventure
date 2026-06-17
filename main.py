@@ -52,13 +52,26 @@ TUNNELS = [
 
 tunnel_exit = {}
 tunnel_cells = []
-for _pair in TUNNELS:
-    tunnel_exit[_pair["a"]] = _pair["b"]
-    tunnel_exit[_pair["b"]] = _pair["a"]
-    tunnel_cells.append((_pair["a"], _pair["color"]))
-    tunnel_cells.append((_pair["b"], _pair["color"]))
+tunnel_positions = set()
 
-tunnel_positions = {cell for cell, _ in tunnel_cells}
+
+def apply_tunnels(pairs):
+    # Reconstruye los tres "indices" de tuneles a partir de una lista de
+    # pares {"a", "b", "color"}.
+    global tunnel_exit, tunnel_cells, tunnel_positions
+
+    tunnel_exit = {}
+    tunnel_cells = []
+    for pair in pairs:
+        a, b = pair["a"], pair["b"]
+        tunnel_exit[a] = b
+        tunnel_exit[b] = a
+        tunnel_cells.append((a, pair["color"]))
+        tunnel_cells.append((b, pair["color"]))
+    tunnel_positions = {cell for cell, _ in tunnel_cells}
+
+
+apply_tunnels(TUNNELS)
 
 
 def current_interval():
@@ -353,16 +366,6 @@ def place_food():
     return random_free_cell(avoid=occupied_cells(include_food=False))
 
 
-def respawn_enemy(e):
-    x, y = random_free_cell(
-        min_head_dist=ENEMY_MIN_SPAWN_DIST,
-        avoid=occupied_cells(),
-    )
-    e["x"], e["y"] = x, y
-    e["px"], e["py"] = x, y
-    e["dx"], e["dy"] = 0, 0
-
-
 def spawn_enemy():
     x, y = random_free_cell(
         min_head_dist=ENEMY_MIN_SPAWN_DIST,
@@ -376,10 +379,33 @@ def spawn_enemy():
     })
 
 
+def relocate_tunnels():
+    # Mueve cada tunel a dos celdas nuevas al azar (conservando su color).
+    global tunnel_exit, tunnel_cells, tunnel_positions
+
+    # Se vacian primero para que las celdas viejas no bloqueen la eleccion.
+    tunnel_exit = {}
+    tunnel_cells = []
+    tunnel_positions = set()
+
+    occupied = occupied_cells()
+    chosen = set()
+    new_pairs = []
+    for pair in TUNNELS:
+        a = random_free_cell(avoid=occupied | chosen)
+        chosen.add(a)
+        b = random_free_cell(avoid=occupied | chosen)
+        chosen.add(b)
+        new_pairs.append({"a": a, "b": b, "color": pair["color"]})
+
+    apply_tunnels(new_pairs)
+
+
 def resolve_enemy_contact():
     global game_over, score, time_since_move
 
     head = snake[0]
+    eaten = []
     for e in enemies:
         if [e["x"], e["y"]] == head:
             if power_timer > 0:
@@ -387,11 +413,17 @@ def resolve_enemy_contact():
                     [e["x"] + CELL_SIZE / 2, e["y"] + CELL_SIZE / 2, 0]
                 )
                 score += ENEMY_EAT_BONUS
-                respawn_enemy(e)
+                # Con el poder, el fantasma se come y desaparece del tablero.
+                eaten.append(e)
             else:
                 game_over = True
                 time_since_move = 0
                 return
+
+    # Los fantasmas comidos no reaparecen al instante: vuelven a salir en el
+    # proximo nivel (cada LEVEL_EVERY manzanas).
+    for e in eaten:
+        enemies.remove(e)
 
 
 def step_enemies():
@@ -460,6 +492,9 @@ def reset_game():
     enemy_time = 0
 
     apples = 0
+
+    # Cada partida arranca con los tuneles en su posicion original.
+    apply_tunnels(TUNNELS)
 
     food_x, food_y = place_food()
 
@@ -598,9 +633,15 @@ while running:
                 score += 1
                 apples += 1
 
-                while len(enemies) < desired_enemy_count():
-                    spawn_enemy()
+                # Cada LEVEL_EVERY manzanas se sube de nivel: los tuneles
+                # cambian de lugar y reaparecen fantasmas hasta completar el
+                # cupo del nivel (aunque te los hayas comido todos).
+                if apples % LEVEL_EVERY == 0:
+                    relocate_tunnels()
+                    while len(enemies) < desired_enemy_count():
+                        spawn_enemy()
 
+                # El poder solo aparece cuando ya hay varios fantasmas.
                 if (
                     power_food is None
                     and apples % POWER_EVERY == 0
